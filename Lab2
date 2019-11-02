@@ -1,0 +1,665 @@
+#include "pch.h"
+#define CL_USE_DEPRECATED_OPENCL_1_2_APIS
+#include <CL/cl.h>
+#include <iostream>
+#include <chrono>
+
+void saxpy_cpu(int n, float a, float * x, int incx, float * y, int incy, int i) {
+	y[incy*i] = a * x[incx*i] + y[incy*i];
+}
+
+void daxpy_cpu(int n, double a, double * x, int incx, double * y, int incy, int i) {
+	y[incy*i] = a * x[incx*i] + y[incy*i];
+}
+
+bool isEqual(float x, float y) {
+	return std::fabs(x - y) < std::numeric_limits<float>::epsilon();
+}
+
+bool is_equal(double x, double y) {
+	return std::fabs(x - y) < std::numeric_limits<double>::epsilon();
+}
+
+int round_up(int num, int multiple) {
+	if (multiple == 0) return num;
+
+	int remainder = num % multiple;
+	if (remainder == 0) return num;
+
+	return num + multiple - remainder;
+}
+
+const char *source1 =
+"__kernel void saxpy_cpu(const unsigned int count, float a, __global float * x, unsigned int incx,  __global float * y, unsigned int incy) { \n"
+"  int i = get_global_id(0);\n"
+"  y[incy*i] = a * x[incx*i] + y[incy*i];             \n"
+"}\n"
+"__kernel void daxpy_cpu(const unsigned int count, double a, __global double * x, unsigned int incx,  __global double * y, unsigned int incy) { \n"
+"  int i = get_global_id(0);\n"
+"  y[incy*i] = a * x[incx*i] + y[incy*i];             \n"
+"}"
+;
+
+const char *source =
+"__kernel void saxpy_gpu(const unsigned int count, float a, __global float * x, unsigned int incx,  __global float * y, unsigned int incy) { \n"
+"  int idx = get_global_id(0);             \n"
+"  y[idx*incy] = a * x[idx*incx] + y[idx*incy];                 \n"
+" // printf(\"y[%d] = %f;\\n \",idx,y[idx]);     \n"
+"}\n"
+"__kernel void daxpy_gpu(const unsigned int count, double a, __global double * x, unsigned int incx,  __global double * y, unsigned int incy) { \n"
+"  int idx = get_global_id(0);             \n"
+"  y[idx*incy] = a * x[idx*incx] + y[idx*incy];                 \n"
+"//  printf(\"y[%d] = %f;\\n \",idx,y[idx]);     \n"
+"}"
+;
+
+
+
+//const unsigned int SIZE;
+
+int main() {
+	cl_int error = 0;
+
+	cl_uint num_platforms = 0;
+	clGetPlatformIDs(0, NULL, &num_platforms);
+
+	cl_platform_id platform = NULL;
+	if (0 < num_platforms) {
+		cl_platform_id *platforms = new cl_platform_id[num_platforms];
+		clGetPlatformIDs(num_platforms, platforms, NULL);
+		platform = platforms[0];
+
+		char platform_name[128];
+		clGetPlatformInfo(platform, CL_PLATFORM_NAME, 128, platform_name, nullptr);
+		std::cout << platform_name << std::endl;
+
+		delete[] platforms;
+	}
+
+	cl_context_properties properties[3] = { CL_CONTEXT_PLATFORM,
+										   (cl_context_properties)platform, 0 };
+
+	cl_context context =
+		clCreateContextFromType((NULL == platform) ? NULL : properties,
+			CL_DEVICE_TYPE_GPU, NULL, NULL, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create context from type failed" << std::endl;
+	}
+
+	size_t size = 0;
+
+	clGetContextInfo(context, CL_CONTEXT_DEVICES, 0, NULL, &size);
+
+	cl_device_id device = 0;
+	if (size > 0) {
+		cl_device_id *devices = (cl_device_id *)alloca(size);
+		clGetContextInfo(context, CL_CONTEXT_DEVICES, size, devices, NULL);
+		device = devices[0];
+
+		char device_name[128];
+		clGetDeviceInfo(device, CL_DEVICE_NAME, 128, device_name, nullptr);
+		std::cout << device_name << std::endl;
+	}
+
+	cl_command_queue queue =
+		clCreateCommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create command queue with properties failed" << std::endl;
+	}
+
+	size_t srclen[] = { strlen(source) };
+
+	cl_program program =
+		clCreateProgramWithSource(context, 1, &source, srclen, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create program with source failed" << std::endl;
+	}
+
+	error = clBuildProgram(program, 1, &device, NULL, NULL, NULL);
+	if (error != CL_SUCCESS) {
+		std::cout << "Build prog failed" << std::endl;
+		size_t logSize = 0;
+		clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0,
+			nullptr, &logSize);
+		char *log = new char[logSize];
+		clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, logSize,
+			log, nullptr);
+		std::cout << log;
+
+	}
+
+
+
+
+	cl_kernel kernel = clCreateKernel(program, "saxpy_gpu", &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create kernel failed" << std::endl;
+	}
+
+	cl_kernel kernel2 = clCreateKernel(program, "daxpy_gpu", &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create kernel failed" << std::endl;
+	}
+
+	
+	unsigned int SIZE;
+//	int data[SIZE];
+	std::cout << "Enter array's size: ";
+	std::cin >> SIZE;
+
+
+	float *results = new float[SIZE];
+	float a = 2;
+	double A = 2;
+	int incx = 1, incy = 1;
+
+
+	float *x = new float[SIZE];
+	float *xcopy = new float[SIZE];
+	float *xomp = new float[SIZE];
+
+	float *y = new float[SIZE];
+	float *ycopy = new float[SIZE];
+	float *yomp = new float[SIZE];
+
+	double *X = new double[SIZE];;
+	double *Xcopy = new double[SIZE];
+	double *Xomp = new double[SIZE];
+
+	double *Y = new double[SIZE];
+	double *Ycopy = new double[SIZE];
+	double *Yomp = new double[SIZE];
+
+
+	for (int i = 0; i < SIZE; i++) {
+		x[i] = rand() % 10;
+		xcopy[i] = x[i];
+		xomp[i] = x[i];
+	//	printf("%d %f \n", i, x[i]);
+
+		y[i] = rand() % 10;
+		ycopy[i] = y[i];
+		yomp[i] = y[i];
+	
+
+	//	printf("%d %f \n", i, y[i]);
+
+		X[i] = rand() % 10;
+		Xcopy[i] = X[i];
+		Xomp[i] = X[i];
+		Y[i] = rand() % 10;
+	}
+
+	
+
+//omp saxpy start
+	auto startSys = std::chrono::steady_clock::now();
+#pragma omp parallel for 
+for (int i = 0; i < SIZE; i++) {
+		saxpy_cpu(SIZE, a, xomp, 1, yomp, 1, i);
+	}
+auto endSys = std::chrono::steady_clock::now();
+std::cout << "Time saxpy_omp: " << std::chrono::duration_cast<std::chrono::nanoseconds>(endSys - startSys).count()*(1e-09) << std::endl;
+
+//omp saxpy end
+
+//omp daxpy start
+ startSys = std::chrono::steady_clock::now();
+#pragma omp parallel for 
+for (int i = 0; i < SIZE; i++) {
+	daxpy_cpu(SIZE, a, Xomp, 1, Yomp, 1, i);
+}
+ endSys = std::chrono::steady_clock::now();
+std::cout << "Time daxpy_omp: " << std::chrono::duration_cast<std::chrono::nanoseconds>(endSys - startSys).count()*(1e-09) << std::endl;
+
+//omp daxpy end
+std::cout << std::endl;
+//start saxpy_cpu
+ startSys = std::chrono::steady_clock::now();
+
+for (int i = 0; i < SIZE; i++) {
+	saxpy_cpu(SIZE, a, x, 1, y, 1, i);
+}
+
+//for (int i = 0; i < SIZE; i++) {
+//	printf("%d %f \n", i, y[i]);
+//}
+ endSys = std::chrono::steady_clock::now();
+std::cout << "Time saxpy_cpu: " << std::chrono::duration_cast<std::chrono::nanoseconds>(endSys - startSys).count()*(1e-09) << std::endl;
+//end saxpy_cpu
+
+
+//start daxpy_cpu
+startSys = std::chrono::steady_clock::now();
+
+for (int i = 0; i < SIZE; i++) {
+	daxpy_cpu(SIZE, a, X, 1, Y, 1, i);
+}
+
+//for (int i = 0; i < SIZE; i++) {
+//	printf("%d %f \n", i, y[i]);
+//}
+endSys = std::chrono::steady_clock::now();
+std::cout << "Time daxpy_cpu: " << std::chrono::duration_cast<std::chrono::nanoseconds>(endSys - startSys).count()*(1e-09) << std::endl;
+//end daxpy_cpu
+std::cout << std::endl;
+
+	size_t count = SIZE;
+
+	//GUI_FLOAT_BUFFERS
+	cl_mem input = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * SIZE, NULL, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create input buffer failed" << std::endl;
+	}
+
+	cl_mem input2 = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(double) * SIZE, NULL, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create input buffer failed" << std::endl;
+	}
+
+	cl_mem output = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * SIZE, NULL, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create input buffer failed" << std::endl;
+	}
+
+	cl_mem output2 = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(double) * SIZE, NULL, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create input buffer failed" << std::endl;
+	}
+
+	error = clEnqueueWriteBuffer(queue, input, CL_TRUE, 0, sizeof(float)*SIZE, xcopy, 0, NULL, NULL);
+	if (error != CL_SUCCESS) {
+		std::cout << "Copy input buffer failed" << std::endl;
+	}
+
+	error = clEnqueueWriteBuffer(queue, output, CL_TRUE, 0, sizeof(float)*SIZE, ycopy, 0, NULL, NULL);
+	if (error != CL_SUCCESS) {
+		std::cout << "Copy output buffer failed" << std::endl;
+	}
+
+	error = clEnqueueWriteBuffer(queue, input2, CL_TRUE, 0, sizeof(double)*SIZE, Xcopy, 0, NULL, NULL);
+	if (error != CL_SUCCESS) {
+		std::cout << "Copy input buffer failed" << std::endl;
+	}
+
+	error = clEnqueueWriteBuffer(queue, output2, CL_TRUE, 0, sizeof(double)*SIZE, Ycopy, 0, NULL, NULL);
+	if (error != CL_SUCCESS) {
+		std::cout << "Copy output buffer failed" << std::endl;
+	}
+
+
+
+	//set float kernel args
+
+	error = clSetKernelArg(kernel, 0, sizeof(unsigned int), &count);
+	if (error != CL_SUCCESS) {
+		std::cout << error << std::endl;
+	}
+
+	error = clSetKernelArg(kernel, 1, sizeof(float), &a);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 1 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel, 2, sizeof(cl_mem), &input);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 2 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel, 3, sizeof(unsigned int), &incx);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 3 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel, 4, sizeof(cl_mem), &output);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 4 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel, 5, sizeof(unsigned int), &incy);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 5 failed" << std::endl;
+	}
+
+
+	error = clSetKernelArg(kernel2, 0, sizeof(unsigned int), &count);
+	if (error != CL_SUCCESS) {
+		std::cout << error << std::endl;
+	}
+	error = clSetKernelArg(kernel2, 1, sizeof(double), &A);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 1 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel2, 2, sizeof(cl_mem), &input2);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 2 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel2, 3, sizeof(unsigned int), &incx);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 3 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel2, 4, sizeof(cl_mem), &output2);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 4 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel2, 5, sizeof(unsigned int), &incy);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 5 failed" << std::endl;
+	}
+
+
+	size_t group = 0;
+
+//	clGetKernelWorkGroupInfo(kernel, device, CL_KERNEL_WORK_GROUP_SIZE,
+//		sizeof(size_t), &group, NULL);
+
+	size_t max_local_work_size;
+	clGetKernelWorkGroupInfo(kernel, device, CL_KERNEL_WORK_GROUP_SIZE,
+		sizeof(size_t), &max_local_work_size, NULL);
+	std::cout << "Max local work size: " << max_local_work_size << std::endl;
+	std::cout << "Set local work size from 1 to " << max_local_work_size << ":" << std::endl;
+	size_t current_local_work_size;
+	std::cin >> current_local_work_size;
+
+	const size_t local_work_size[] = { current_local_work_size };
+	const size_t global_work_size[] = { (size_t)round_up((size_t)SIZE, (size_t)local_work_size[0]) };
+	const size_t global_work_offset[] = { 0 };
+
+
+	cl_event evt, evt2, evt3, evt4, evt5, evt6, evt7,evt8;
+
+
+	
+	clEnqueueNDRangeKernel(queue, kernel, 1, global_work_offset, global_work_size, local_work_size, 0, NULL, &evt);  //!!!!!!!!!!!!!!!
+	clWaitForEvents(1, &evt);
+	clEnqueueReadBuffer(queue, output, CL_TRUE, 0, sizeof(float) * SIZE, results, 0, NULL, &evt2);
+	clWaitForEvents(1, &evt2);
+
+	/*std::cout << "SAXPY_GPU" << std::endl;
+	for (int i = 0; i < SIZE; i++) {
+		std::cout << "y[" << i << "] = " << results[i]<<std::endl;
+	}*/
+
+	
+
+	cl_ulong start = 0, end = 0;
+	error = clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, nullptr);
+	if (error != CL_SUCCESS) {
+		std::cout << "Error getting start time: " << error << std::endl;
+	}
+	error = clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, nullptr);
+	if (error != CL_SUCCESS) {
+		std::cout << "Error getting end time: " << error << std::endl;
+	}
+
+	std::cout << "Time saxpy_gpu: " << (cl_double)(end - start)*(cl_double)(1e-09) << std::endl;
+	size_t total_mismatches = 0;
+#pragma omp parallel for reduction(+:total_mismatches)
+	for (int i = 0; i < SIZE; ++i) {
+		if (!is_equal(y[i], results[i]) || !is_equal(yomp[i], results[i])) {
+			total_mismatches++;
+		}
+	}
+	if (total_mismatches == 0) {
+		std::cout << "SAXPY results are equal" << std::endl;
+	}
+	int total_mismatches1 = 0;
+
+	clEnqueueNDRangeKernel(queue, kernel2, 1, global_work_offset, global_work_size, local_work_size, 0, NULL, &evt3);
+	clWaitForEvents(1, &evt3);
+	clEnqueueReadBuffer(queue, output, CL_TRUE, 0, sizeof(float) * SIZE, results, 0, NULL, &evt4);
+	clWaitForEvents(1, &evt4);
+
+
+#pragma omp parallel for reduction(+:total_mismatches)
+
+	for (int i = 0; i < SIZE; ++i) {
+		if (!is_equal(Y[i], results[i]) || !is_equal(Yomp[i], results[i])) {
+			total_mismatches1++;
+		}
+	}
+
+	error = clGetEventProfilingInfo(evt3, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, nullptr);
+	if (error != CL_SUCCESS) {
+		std::cout << "Error getting start time: " << error << std::endl;
+	}
+	error = clGetEventProfilingInfo(evt3, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, nullptr);
+	if (error != CL_SUCCESS) {
+		std::cout << "Error getting end time: " << error << std::endl;
+	}
+
+	std::cout << "Time daxpy_gpu: " << (cl_double)(end - start)*(cl_double)(1e-09) << std::endl;
+
+	if (total_mismatches == 0) {
+		std::cout << "DAXPY results are equal" << std::endl;
+	}
+	std::cout << std::endl << std::endl;
+	cl_context context1 =
+		clCreateContextFromType((NULL == platform) ? NULL : properties,
+			CL_DEVICE_TYPE_CPU, NULL, NULL, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create context from type failed" << std::endl;
+	}
+
+	size_t size1 = 0;
+
+	clGetContextInfo(context1, CL_CONTEXT_DEVICES, 0, NULL, &size1);
+
+	cl_device_id device1 = 0;
+	if (size > 0) {
+		cl_device_id *devices1 = (cl_device_id *)alloca(size);
+		clGetContextInfo(context1, CL_CONTEXT_DEVICES, size1, devices1, NULL);
+		device1 = devices1[0];
+
+		char device_name[128];
+		clGetDeviceInfo(device1, CL_DEVICE_NAME, 128, device_name, nullptr);
+		std::cout << device_name << std::endl;
+	}
+
+	cl_command_queue queue1 =
+		clCreateCommandQueue(context1, device1, CL_QUEUE_PROFILING_ENABLE, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create command queue with properties failed" << std::endl;
+	}
+
+	size_t srclen1[] = { strlen(source) };
+
+	cl_program program1 =
+		clCreateProgramWithSource(context1, 1, &source1, srclen1, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create program with source failed" << std::endl;
+	}
+
+	error = clBuildProgram(program1, 1, &device1, NULL, NULL, NULL);
+	if (error != CL_SUCCESS) {
+		std::cout << "Build prog failed" << std::endl;
+		size_t logSize1 = 0;
+		clGetProgramBuildInfo(program1, device1, CL_PROGRAM_BUILD_LOG, 0,
+			nullptr, &logSize1);
+		char *log = new char[logSize1];
+		clGetProgramBuildInfo(program1, device1, CL_PROGRAM_BUILD_LOG, logSize1,
+			log, nullptr);
+		std::cout << log;
+
+	}
+
+
+
+
+	cl_kernel kernel3 = clCreateKernel(program1, "saxpy_cpu", &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create kernel failed" << std::endl;
+	}
+
+	cl_kernel kernel4 = clCreateKernel(program1, "daxpy_cpu", &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create kernel failed" << std::endl;
+	}
+
+	cl_mem input3 = clCreateBuffer(context1, CL_MEM_READ_ONLY, sizeof(float) * SIZE, NULL, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create input buffer failed" << std::endl;
+	}
+
+	cl_mem input4 = clCreateBuffer(context1, CL_MEM_READ_ONLY, sizeof(double) * SIZE, NULL, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create input buffer failed" << std::endl;
+	}
+
+	cl_mem output3 = clCreateBuffer(context1, CL_MEM_READ_WRITE, sizeof(float) * SIZE, NULL, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create input buffer failed" << std::endl;
+	}
+
+	cl_mem output4 = clCreateBuffer(context1, CL_MEM_READ_WRITE, sizeof(double) * SIZE, NULL, &error);
+	if (error != CL_SUCCESS) {
+		std::cout << "Create input buffer failed" << std::endl;
+	}
+
+	error = clEnqueueWriteBuffer(queue1, input3, CL_TRUE, 0, sizeof(float)*SIZE, x, 0, NULL, NULL);
+	if (error != CL_SUCCESS) {
+		std::cout << "Copy input buffer failed" << std::endl;
+	}
+
+	error = clEnqueueWriteBuffer(queue1, output3, CL_TRUE, 0, sizeof(float)*SIZE, y, 0, NULL, NULL);
+	if (error != CL_SUCCESS) {
+		std::cout << "Copy output buffer failed" << std::endl;
+	}
+
+	error = clEnqueueWriteBuffer(queue1, input4, CL_TRUE, 0, sizeof(double)*SIZE, X, 0, NULL, NULL);
+	if (error != CL_SUCCESS) {
+		std::cout << "Copy input buffer failed" << std::endl;
+	}
+
+	error = clEnqueueWriteBuffer(queue1, output4, CL_TRUE, 0, sizeof(double)*SIZE, Y, 0, NULL, NULL);
+	if (error != CL_SUCCESS) {
+		std::cout << "Copy output buffer failed" << std::endl;
+	}
+
+
+
+	//set float kernel args
+
+	error = clSetKernelArg(kernel3, 0, sizeof(unsigned int), &count);
+	if (error != CL_SUCCESS) {
+		std::cout << error << std::endl;
+	}
+
+	error = clSetKernelArg(kernel3, 1, sizeof(float), &a);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 1 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel3, 2, sizeof(cl_mem), &input3);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 2 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel3, 3, sizeof(unsigned int), &incx);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 3 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel3, 4, sizeof(cl_mem), &output3);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 4 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel3, 5, sizeof(unsigned int), &incy);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 5 failed" << std::endl;
+	}
+
+
+	error = clSetKernelArg(kernel4, 0, sizeof(unsigned int), &count);
+	if (error != CL_SUCCESS) {
+		std::cout << error << std::endl;
+	}
+	error = clSetKernelArg(kernel4, 1, sizeof(double), &A);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 1 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel4, 2, sizeof(cl_mem), &input4);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 2 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel4, 3, sizeof(unsigned int), &incx);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 3 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel4, 4, sizeof(cl_mem), &output4);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 4 failed" << std::endl;
+	}
+
+	error = clSetKernelArg(kernel4, 5, sizeof(unsigned int), &incy);
+	if (error != CL_SUCCESS) {
+		std::cout << "clSetKernelArg 5 failed" << std::endl;
+	}
+	clEnqueueNDRangeKernel(queue1, kernel3, 1, global_work_offset, global_work_size, local_work_size, 0, NULL, &evt5);  //!!!!!!!!!!!!!!!
+	clWaitForEvents(1, &evt5);
+	clEnqueueReadBuffer(queue1, output3, CL_TRUE, 0, sizeof(float) * SIZE, results, 0, NULL, &evt6);
+	clWaitForEvents(1, &evt6);
+
+	/*std::cout << "SAXPY_GPU" << std::endl;
+	for (int i = 0; i < SIZE; i++) {
+		std::cout << "y[" << i << "] = " << results[i]<<std::endl;
+	}*/
+
+
+
+	start = 0, end = 0;
+	error = clGetEventProfilingInfo(evt5, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, nullptr);
+	if (error != CL_SUCCESS) {
+		std::cout << "Error getting start time: " << error << std::endl;
+	}
+	error = clGetEventProfilingInfo(evt5, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, nullptr);
+	if (error != CL_SUCCESS) {
+		std::cout << "Error getting end time: " << error << std::endl;
+	}
+
+	std::cout << "Time saxpy_OpenCL_cpu: " << (cl_double)(end - start)*(cl_double)(1e-09) << std::endl;
+
+
+	clEnqueueNDRangeKernel(queue1, kernel4, 1, global_work_offset, global_work_size, local_work_size, 0, NULL, &evt7);  //!!!!!!!!!!!!!!!
+	clWaitForEvents(1, &evt7);
+	clEnqueueReadBuffer(queue1, output4, CL_TRUE, 0, sizeof(float) * SIZE, results, 0, NULL, &evt8);
+	clWaitForEvents(1, &evt8);
+
+	/*std::cout << "SAXPY_GPU" << std::endl;
+	for (int i = 0; i < SIZE; i++) {
+		std::cout << "y[" << i << "] = " << results[i]<<std::endl;
+	}*/
+
+
+
+	start = 0, end = 0;
+	error = clGetEventProfilingInfo(evt7, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, nullptr);
+	if (error != CL_SUCCESS) {
+		std::cout << "Error getting start time: " << error << std::endl;
+	}
+	error = clGetEventProfilingInfo(evt7, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, nullptr);
+	if (error != CL_SUCCESS) {
+		std::cout << "Error getting end time: " << error << std::endl;
+	}
+
+	std::cout << "Time daxpy_OpenCL_cpu: " << (cl_double)(end - start)*(cl_double)(1e-09) << std::endl;
+
+
+
+	clReleaseMemObject(input);
+	clReleaseMemObject(output);
+//	clReleaseMemObject(output);
+	clReleaseProgram(program);
+	clReleaseKernel(kernel);
+	clReleaseCommandQueue(queue);
+	clReleaseContext(context);
+	return 0;
+}
